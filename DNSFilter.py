@@ -11,7 +11,10 @@ DNS_SERVS = []
 DNS_SERVS_NUM = 0
 
 # Filter List
-FILTER_LIST = []
+FILTER_IPS = []
+FILTER_IPS_NUM = 0
+FILTER_IPSETS = []
+FILTER_IPSETS_NUM = 0
 
 CFG_FILE = "config.json"
 
@@ -26,7 +29,22 @@ def ip2int(ip):
 
 def ischar(ch):
     return ord(ch) < 192 # 192 == 0xc0
-    
+   
+def binary_search(arr, key, lo = 0, hi = None):
+    if hi is None:
+        hi = len(arr)
+
+    while lo < hi:
+        mid = (lo+hi) >> 1 # equal with (lo+hi)/2
+        midval = arr[mid]
+        if midval < key:
+            lo = mid+1
+        elif midval > key: 
+            hi = mid
+        else:
+            return mid
+    return -1
+
 def bytetodomain(s):
     domain = ''
     i = 0
@@ -50,7 +68,7 @@ def IsValidPkt(response):
     bflag = (flag & 0x8000) and (not (flag & 0x780f))
 
     
-    if bflag and 1 == qdcount and 1 == ancount:
+    if bflag and 1 == qdcount: # and 1 == ancount:
         (domain, dlen) = bytetodomain(response[12:])
 
         pos = 14 + dlen  # position for qtype & qclass
@@ -66,11 +84,21 @@ def IsValidPkt(response):
             pos = pos + 12
 
         intip = struct.unpack('!I', response[pos:pos+4])[0]
-        for item in FILTER_LIST:
-            if intip == item:
-                print "Matched ", domain
-                return False
+        #for item in FILTER_IPS:
+        #    if intip == item:
+        #        print "Matched ", domain
+        #        return False
+        if -1 != binary_search(FILTER_IPS, intip, 0, FILTER_IPS_NUM):
+            print "Matched ", domain
+            return False
 
+        if -1 != binary_search(FILTER_IPSETS, intip & 0xffffff00, 0, FILTER_IPSETS_NUM):
+            print "Set Matched ", domain
+            return False
+        #for item in FILTER_IPSETS:
+        #    if (intip & 0xffffff00) == item:
+        #        print "Set Matched ", domain
+        #        return False
     return True
     
 def QueryDNS(server, port, querydata):
@@ -130,11 +158,18 @@ if __name__ == "__main__":
     # parse each page
     for ip in cfg["dns_servers"]:
         DNS_SERVS.append(ip)
+    DNS_SERVS.sort()
     DNS_SERVS_NUM = len(DNS_SERVS)
-    
-    for ip in cfg["filter_ips"]:
-        FILTER_LIST.append(ip2int(ip))
 
+    for ip in cfg["filter_ips"]:
+        FILTER_IPS.append(ip2int(ip))
+    FILTER_IPS.sort()
+    FILTER_IPS_NUM = len(FILTER_IPS)
+
+    for ip in cfg["filter_ipsets"]:
+        FILTER_IPSETS.append(ip2int(ip))
+    FILTER_IPSETS.sort()
+    FILTER_IPSETS_NUM = len(FILTER_IPSETS)
     #sys.exit(0)
     
     dns_server = ThreadedUDPServer(('127.0.0.1', DNS_PORT), ThreadedUDPRequestHandler)
