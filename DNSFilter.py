@@ -6,30 +6,26 @@ import SocketServer
 import random
 import json
 
-# DNS Server List
-DNS_SERVS = []
-DNS_SERVS_NUM = 0
+# config
+DNSFILTER_CFG_FILE = "config.json"
+DNSFILTER_CFG = {}
 
-# Filter List
-FILTER_IPS = []
-FILTER_IPS_NUM = 0
-FILTER_IPSETS = []
-FILTER_IPSETS_NUM = 0
-
-CFG_FILE = "config.json"
-
-
+# dns server config
 DNS_PORT = 53           # default dns port 53
-TIMEOUT = 5             # set timeout 5 second
+TIMEOUT = 10             # set timeout 5 second
 TRY_TIMES = 3           # try to recv msg times
 
 def ip2int(ip):
+    """
+    IP string to INT convert.
+    """
     t = socket.inet_aton(ip)
     return struct.unpack("!I", t)[0]
 
 def ischar(ch):
     return ord(ch) < 192 # 192 == 0xc0
-   
+
+# binart search, have a little changes to suit this project.
 def binary_search(arr, key, lo = 0, hi = None):
     if hi is None:
         hi = len(arr)
@@ -37,11 +33,21 @@ def binary_search(arr, key, lo = 0, hi = None):
     while lo < hi:
         mid = (lo+hi) >> 1 # equal with (lo+hi)/2
         midval = arr[mid]
-        if midval < key:
-            lo = mid+1
-        elif midval > key: 
+        
+        ipkey = key
+        if 0 == (midval & 0x000000ff):  # ip format xxx.xxx.xxx.0/24
+            ipkey = ipkey & 0xffffff00
+        if 0 == (midval & 0x0000ff00):  # ip format xxx.xxx.0.0/16
+            ipkey = ipkey & 0xffff00ff
+        if 0 == (midval & 0x00ff0000):  # ip format xxx.0.0.0/8
+            ipkey = ipkey & 0xff00ffff
+
+        if midval < ipkey:
+            lo = mid + 1
+        elif midval > ipkey: 
             hi = mid
         else:
+            #print "Matched with", (midval>> 24) & 0x00ff, ".", (midval>> 16) & 0x00ff, ".", (midval>> 8) & 0x00ff, ".", (midval>> 0) & 0x00ff
             return mid
     return -1
 
@@ -84,21 +90,10 @@ def IsValidPkt(response):
             pos = pos + 12
 
         intip = struct.unpack('!I', response[pos:pos+4])[0]
-        #for item in FILTER_IPS:
-        #    if intip == item:
-        #        print "Matched ", domain
-        #        return False
-        if -1 != binary_search(FILTER_IPS, intip, 0, FILTER_IPS_NUM):
+        if -1 != binary_search(DNSFILTER_CFG["filter_ips"], intip, 0, DNSFILTER_CFG["filter_ips_num"]):
             print "Matched ", domain
             return False
 
-        if -1 != binary_search(FILTER_IPSETS, intip & 0xffffff00, 0, FILTER_IPSETS_NUM):
-            print "Set Matched ", domain
-            return False
-        #for item in FILTER_IPSETS:
-        #    if (intip & 0xffffff00) == item:
-        #        print "Set Matched ", domain
-        #        return False
     return True
     
 def QueryDNS(server, port, querydata):
@@ -138,8 +133,8 @@ class ThreadedUDPRequestHandler(SocketServer.BaseRequestHandler):
         sock = self.request[1]
         client_address = self.client_address
 
-        dns_ip = DNS_SERVS[random.randint(0, DNS_SERVS_NUM - 1)]
-        #dns_ip = DNS_SERVS[0]
+        dns_ip = DNSFILTER_CFG["dns_servs"][random.randint(0, DNSFILTER_CFG["dns_servs_num"] - 1)]
+        #dns_ip = DNSFILTER_CFG["dns_servs"][0]
 
         response = QueryDNS(dns_ip, DNS_PORT, data)
         if response:
@@ -151,27 +146,20 @@ if __name__ == "__main__":
     print "---------------------------------------------------------------"
 
      # load config file
-    f = file(CFG_FILE)
-    cfg = json.load(f)
+    f = file(DNSFILTER_CFG_FILE)
+    DNSFILTER_CFG = json.load(f)
     f.close()
 
-    # parse each page
-    for ip in cfg["dns_servers"]:
-        DNS_SERVS.append(ip)
-    DNS_SERVS.sort()
-    DNS_SERVS_NUM = len(DNS_SERVS)
+    # parse each para
+    DNSFILTER_CFG["dns_servs_num"] = len(DNSFILTER_CFG["dns_servs"])
 
-    for ip in cfg["filter_ips"]:
-        FILTER_IPS.append(ip2int(ip))
-    FILTER_IPS.sort()
-    FILTER_IPS_NUM = len(FILTER_IPS)
+    DNSFILTER_CFG["filter_ips"] = []
+    for item in DNSFILTER_CFG["ip_blacklist"]:
+        DNSFILTER_CFG["filter_ips"].append(ip2int(item))
+    DNSFILTER_CFG["filter_ips"].sort()
+    DNSFILTER_CFG["filter_ips_num"] = len(DNSFILTER_CFG["filter_ips"])
 
-    for ip in cfg["filter_ipsets"]:
-        FILTER_IPSETS.append(ip2int(ip))
-    FILTER_IPSETS.sort()
-    FILTER_IPSETS_NUM = len(FILTER_IPSETS)
     #sys.exit(0)
     
     dns_server = ThreadedUDPServer(('127.0.0.1', DNS_PORT), ThreadedUDPRequestHandler)
     dns_server.serve_forever()
-
