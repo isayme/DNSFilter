@@ -6,13 +6,15 @@ import SocketServer
 import random
 import json
 
+import DTree
+
 # config
 DNSFILTER_CFG_FILE = "config.json"
 DNSFILTER_CFG = {}
 
 # dns server config
 DNS_PORT = 53           # default dns port 53
-TIMEOUT = 10             # set timeout 5 second
+TIMEOUT = 10            # set timeout 5 second
 TRY_TIMES = 3           # try to recv msg times
 
 def ip2int(ip):
@@ -47,7 +49,9 @@ def binary_search(arr, key, lo = 0, hi = None):
         elif midval > ipkey: 
             hi = mid
         else:
-            #print "Matched with", (midval>> 24) & 0x00ff, ".", (midval>> 16) & 0x00ff, ".", (midval>> 8) & 0x00ff, ".", (midval>> 0) & 0x00ff
+            print "Matched with [%d.%d.%d.%d = %d.%d.%d.%d]" \
+                % ((midval>> 24) & 0x00ff, (midval>> 16) & 0x00ff, (midval>> 8) & 0x00ff, (midval>> 0) & 0x00ff \
+                    , (key>> 24) & 0x00ff, (key>> 16) & 0x00ff, (key>> 8) & 0x00ff, (key>> 0) & 0x00ff)
             return mid
     return -1
 
@@ -95,8 +99,24 @@ def IsValidPkt(response):
             return False
 
     return True
-    
-def QueryDNS(server, port, querydata):
+ 
+def QueryDNSByTCP(server, port, querydata):
+    # make TCP DNS Frame
+    tcp_frame = struct.pack('!h', len(querydata)) + querydata
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(TIMEOUT) # set socket timeout
+        s.connect((server, port))
+        s.send(tcp_frame)
+        data = s.recv(2048)
+    except:
+        print '[ERROR] QueryDNSByTCP: [%s:%s].' % (bytetodomain(querydata[12:])[0], e.message)
+    finally:  
+        if s:
+            s.close()
+    return data[2:]
+
+def QueryDNSByUDP(server, port, querydata):
     data = None
     
     try:
@@ -105,21 +125,31 @@ def QueryDNS(server, port, querydata):
         s.settimeout(TIMEOUT)
         s.sendto(querydata, (server, port))
 
-        for i in range(1, TRY_TIMES + 1):
+        for i in range(0, TRY_TIMES):
             (data, srv_addr) = s.recvfrom(1024)
             if False == IsValidPkt(data):
+                #D_TREE.addDomain(bytetodomain(querydata[12:])[0])
                 date = None
             else:
                 break
 
     except Exception, e:
-        print '[ERROR] QueryDNS: [%s:%s].' % (bytetodomain(querydata[12:])[0], e.message)
+        print '[ERROR] QueryDNSByUDP: [%s:%s].' % (bytetodomain(querydata[12:])[0], e.message)
     finally:
         if s:
             s.close()
+            
+    return data
 
-        return data
-
+def QueryDNS(server, port, querydata):
+    domain = bytetodomain(querydata[12:])[0]
+    if True == DNSFILTER_CFG["filter_domains"].searchDomain(domain):
+        print "TCP Query [%s]" % domain
+        return QueryDNSByTCP(server, port, querydata)
+    else:
+        print "UDP Query [%s]" % domain
+        return QueryDNSByUDP(server, port, querydata)
+    
 class ThreadedUDPServer(SocketServer.ThreadingMixIn, SocketServer.UDPServer):
     # Ctrl-C will cleanly kill all spawned threads
     daemon_threads = True
@@ -145,7 +175,7 @@ if __name__ == "__main__":
     print "| To Use this tool, you must set your dns server to 127.0.0.1 |"
     print "---------------------------------------------------------------"
 
-     # load config file
+    # load config file
     f = file(DNSFILTER_CFG_FILE)
     DNSFILTER_CFG = json.load(f)
     f.close()
@@ -159,6 +189,10 @@ if __name__ == "__main__":
     DNSFILTER_CFG["filter_ips"].sort()
     DNSFILTER_CFG["filter_ips_num"] = len(DNSFILTER_CFG["filter_ips"])
 
+    DNSFILTER_CFG["filter_domains"] = DTree.DTree()
+    for item in DNSFILTER_CFG["domain_blacklist"]:
+        DNSFILTER_CFG["filter_domains"].addDomain(item)
+        
     #sys.exit(0)
     
     dns_server = ThreadedUDPServer(('127.0.0.1', DNS_PORT), ThreadedUDPRequestHandler)
