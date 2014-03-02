@@ -14,7 +14,7 @@ DNSFILTER_CFG = {}
 
 # dns server config
 DNS_PORT = 53           # default dns port 53
-TIMEOUT = 10            # set timeout 5 second
+TIMEOUT = 10            # set timeout 10 second, and why v2exer born with sharp eyes! 
 TRY_TIMES = 3           # try to recv msg times
 
 def ip2int(ip):
