@@ -47,7 +47,7 @@ def binary_search(arr, key, lo = 0, hi = None):
         if midval < ipkey:
             lo = mid + 1
         elif midval > ipkey: 
-            hi = mid
+            hi = mid - 1
         else:
             print "Matched with [%d.%d.%d.%d = %d.%d.%d.%d]" \
                 % ((midval>> 24) & 0x00ff, (midval>> 16) & 0x00ff, (midval>> 8) & 0x00ff, (midval>> 0) & 0x00ff \
