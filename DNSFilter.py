@@ -6,15 +6,13 @@ import SocketServer
 import random
 import json
 
-import DTree
+import threadpool
 
 # config
-DNSFILTER_CFG_FILE = "config.json"
 DNSFILTER_CFG = {}
 
 # dns server config
-DNS_PORT = 53           # default dns port 53
-TIMEOUT = 10            # set timeout 10 second, and why v2exer born with sharp eyes! 
+TIMEOUT = 5            # set timeout 5 second
 TRY_TIMES = 3           # try to recv msg times
 
 def ip2int(ip):
@@ -22,7 +20,7 @@ def ip2int(ip):
     IP string to INT convert.
     """
     t = socket.inet_aton(ip)
-    return struct.unpack("!I", t)[0]
+    return struct.unpack('!I', t)[0]
 
 def ischar(ch):
     return ord(ch) < 192 # 192 == 0xc0
@@ -49,7 +47,7 @@ def binary_search(arr, key, lo = 0, hi = None):
         elif midval > ipkey: 
             hi = mid - 1
         else:
-            print "Matched with [%d.%d.%d.%d = %d.%d.%d.%d]" \
+            print 'Matched with [%d.%d.%d.%d = %d.%d.%d.%d]' \
                 % ((midval>> 24) & 0x00ff, (midval>> 16) & 0x00ff, (midval>> 8) & 0x00ff, (midval>> 0) & 0x00ff \
                     , (key>> 24) & 0x00ff, (key>> 16) & 0x00ff, (key>> 8) & 0x00ff, (key>> 0) & 0x00ff)
             return mid
@@ -70,7 +68,7 @@ def bytetodomain(s):
 
     return (domain, i - 1)
 
-def IsValidPkt(response):
+def is_valid_pkt(response):
     (flag, qdcount, ancount) = struct.unpack('!HHH', response[2:8])
 
     # response pkt & standard query & no error
@@ -94,106 +92,92 @@ def IsValidPkt(response):
             pos = pos + 12
 
         intip = struct.unpack('!I', response[pos:pos+4])[0]
-        if -1 != binary_search(DNSFILTER_CFG["filter_ips"], intip, 0, DNSFILTER_CFG["filter_ips_num"]):
-            print "Matched ", domain
+        if -1 != binary_search(DNSFILTER_CFG['filter_ips'], intip, 0, DNSFILTER_CFG['filter_ips_num']):
             return False
 
     return True
- 
-def QueryDNSByTCP(server, port, querydata):
-    # make TCP DNS Frame
-    tcp_frame = struct.pack('!h', len(querydata)) + querydata
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(TIMEOUT) # set socket timeout
-        s.connect((server, port))
-        s.send(tcp_frame)
-        data = s.recv(2048)
-    except:
-        print '[ERROR] QueryDNSByTCP: [%s:%s].' % (bytetodomain(querydata[12:])[0], e.message)
-    finally:  
-        if s:
-            s.close()
-    return data[2:]
 
-def QueryDNSByUDP(server, port, querydata):
-    data = None
-    
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        # set socket timeout
-        s.settimeout(TIMEOUT)
-        s.sendto(querydata, (server, port))
+class ThreadPoolMixIn:
+    def process_request_thread(self, request, client_address):
+        try:
+            self.finish_request(request, client_address)
+            self.shutdown_request(request)
+        except:
+            self.handle_error(request, client_address)
+            self.shutdown_request(request)
 
-        for i in range(0, TRY_TIMES):
-            (data, srv_addr) = s.recvfrom(1024)
-            if False == IsValidPkt(data):
-                #D_TREE.addDomain(bytetodomain(querydata[12:])[0])
-                date = None
-            else:
-                break
+    def process_request(self, request, client_address):
+        self.tp.add_task(self.process_request_thread, request, client_address)
 
-    except Exception, e:
-        print '[ERROR] QueryDNSByUDP: [%s:%s].' % (bytetodomain(querydata[12:])[0], e.message)
-    finally:
-        if s:
-            s.close()
+    def serve_forever(self, poll_interval=0.5):
+        try:
+            SocketServer.UDPServer.serve_forever(self, poll_interval)
+        finally:
+            self.tp.stop()
             
-    return data
 
-def QueryDNS(server, port, querydata):
-    domain = bytetodomain(querydata[12:])[0]
-    if True == DNSFILTER_CFG["filter_domains"].searchDomain(domain):
-        print "TCP Query [%s]" % domain
-        return QueryDNSByTCP(server, port, querydata)
-    else:
-        print "UDP Query [%s]" % domain
-        return QueryDNSByUDP(server, port, querydata)
+class DNSFilter(ThreadPoolMixIn, SocketServer.UDPServer):
+    # much faster rebinding
+    allow_reuse_address = True
     
-class ThreadedUDPServer(SocketServer.ThreadingMixIn, SocketServer.UDPServer):
-    # Ctrl-C will cleanly kill all spawned threads
-    daemon_threads = True
-    
-    def __init__(self, s, t):
+    def __init__(self, s, t):        
+        self.tp = threadpool.ThreadPool(20)
         SocketServer.UDPServer.__init__(self, s, t)
-
+  
+  
 class ThreadedUDPRequestHandler(SocketServer.BaseRequestHandler):
     def handle(self):
-        data = self.request[0]
-        sock = self.request[1]
-        client_address = self.client_address
+        query_data = self.request[0]
+        udp_sock = self.request[1]
+        addr = self.client_address
 
-        dns_ip = DNSFILTER_CFG["dns_servs"][random.randint(0, DNSFILTER_CFG["dns_servs_num"] - 1)]
-        #dns_ip = DNSFILTER_CFG["dns_servs"][0]
-
-        response = QueryDNS(dns_ip, DNS_PORT, data)
+        dns_ip = DNSFILTER_CFG['dns_servs'][random.randint(0, DNSFILTER_CFG['dns_servs_num'] - 1)]
+        response = self.dns_query(dns_ip, 53, query_data)
         if response:
-            sock.sendto(response, client_address)
+            # udp dns packet no length
+            udp_sock.sendto(response, addr)
+ 
+    def dns_query(self, dns_ip, dns_port, query_data):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(5) # set socket timeout = 5s
         
-if __name__ == "__main__":
-    print "---------------------------------------------------------------"
-    print "| To Use this tool, you must set your dns server to 127.0.0.1 |"
-    print "---------------------------------------------------------------"
+            s.sendto(query_data, (dns_ip, dns_port))
+            
+            for i in xrange(TRY_TIMES):
+                data, addr = s.recvfrom(1024)
+                if False == is_valid_pkt(data):
+                    date = None
+                else:
+                    break
+            
+        except:
+            return None
+        finally:
+            if s: s.close()
+
+        return data
+    
+    
+if __name__ == '__main__':
+    print '---------------------------------------------------------------'
+    print '| To Use this tool, you must set your dns server to 127.0.0.1 |'
+    print '---------------------------------------------------------------'
 
     # load config file
-    f = file(DNSFILTER_CFG_FILE)
+    f = file('config.json')
     DNSFILTER_CFG = json.load(f)
     f.close()
 
     # parse each para
-    DNSFILTER_CFG["dns_servs_num"] = len(DNSFILTER_CFG["dns_servs"])
+    DNSFILTER_CFG['dns_servs_num'] = len(DNSFILTER_CFG['dns_servs'])
 
-    DNSFILTER_CFG["filter_ips"] = []
-    for item in DNSFILTER_CFG["ip_blacklist"]:
-        DNSFILTER_CFG["filter_ips"].append(ip2int(item))
-    DNSFILTER_CFG["filter_ips"].sort()
-    DNSFILTER_CFG["filter_ips_num"] = len(DNSFILTER_CFG["filter_ips"])
+    DNSFILTER_CFG['filter_ips'] = []
+    for item in DNSFILTER_CFG['ip_blacklist']:
+        DNSFILTER_CFG['filter_ips'].append(ip2int(item))
+    DNSFILTER_CFG['filter_ips'].sort()
+    DNSFILTER_CFG['filter_ips_num'] = len(DNSFILTER_CFG['filter_ips'])
 
-    DNSFILTER_CFG["filter_domains"] = DTree.DTree()
-    for item in DNSFILTER_CFG["domain_blacklist"]:
-        DNSFILTER_CFG["filter_domains"].addDomain(item)
-        
-    #sys.exit(0)
     
-    dns_server = ThreadedUDPServer(('127.0.0.1', DNS_PORT), ThreadedUDPRequestHandler)
+    dns_server = DNSFilter(('0.0.0.0', 53), ThreadedUDPRequestHandler)
     dns_server.serve_forever()

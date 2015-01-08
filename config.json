@@ -531,17 +531,5 @@
     "220.232.227.0",
     "220.232.237.0",
     "253.157.14.0"
-],
-
-"domain_blacklist":[
-    "facebook.com",
-    "*.facebook.com",
-    "twitter.com",
-    "*.twitter.com",
-    "google.com",
-    "*.google.com",
-    "youtube.com",
-    "*.youtube.com"
 ]
-
 }
