@@ -1,58 +1,20 @@
-import os, sys
+import os
+import sys
 import socket
 import struct
-import threading
 import SocketServer
-import random
-import json
 
 import threadpool
 
-# config
-DNSFILTER_CFG = {}
+# fake ip list
+FAKE_IPLIST = {}
 
 # dns server config
-TIMEOUT = 5            # set timeout 5 second
-TRY_TIMES = 3           # try to recv msg times
+TIMEOUT = 2             # set timeout 2 second
+TRY_TIMES = 5           # try to recv msg times
+DNS_SERVER = '8.8.8.8'  # remote dns server
 
-def ip2int(ip):
-    """
-    IP string to INT convert.
-    """
-    t = socket.inet_aton(ip)
-    return struct.unpack('!I', t)[0]
-
-def ischar(ch):
-    return ord(ch) < 192 # 192 == 0xc0
-
-# binart search, have a little changes to suit this project.
-def binary_search(arr, key, lo = 0, hi = None):
-    if hi is None:
-        hi = len(arr)
-
-    while lo < hi:
-        mid = (lo+hi) >> 1 # equal with (lo+hi)/2
-        midval = arr[mid]
-        
-        ipkey = key
-        if 0 == (midval & 0x000000ff):  # ip format xxx.xxx.xxx.0/24
-            ipkey = ipkey & 0xffffff00
-        if 0 == (midval & 0x0000ff00):  # ip format xxx.xxx.0.0/16
-            ipkey = ipkey & 0xffff00ff
-        if 0 == (midval & 0x00ff0000):  # ip format xxx.0.0.0/8
-            ipkey = ipkey & 0xff00ffff
-
-        if midval < ipkey:
-            lo = mid + 1
-        elif midval > ipkey: 
-            hi = mid - 1
-        else:
-            print 'Matched with [%d.%d.%d.%d = %d.%d.%d.%d]' \
-                % ((midval>> 24) & 0x00ff, (midval>> 16) & 0x00ff, (midval>> 8) & 0x00ff, (midval>> 0) & 0x00ff \
-                    , (key>> 24) & 0x00ff, (key>> 16) & 0x00ff, (key>> 8) & 0x00ff, (key>> 0) & 0x00ff)
-            return mid
-    return -1
-
+# currently not used
 def bytetodomain(s):
     domain = ''
     i = 0
@@ -62,38 +24,51 @@ def bytetodomain(s):
         i += 1
         domain += s[i:i + length]
         i += length
-        length = struct.unpack('!B', s[i:i + 1])[0]
+        length = struct.unpack('!B', s[i:i+1])[0]
         if length != 0:
             domain += '.'
 
-    return (domain, i - 1)
+    return (domain, i + 1)
+
+def skip_query(query):
+    step = 0
+    
+    length = struct.unpack('!B', query[0:1])[0]
+    while length != 0:
+        step = step + length + 1
+        length = struct.unpack('!B', query[step:step+1])[0]
+
+    return step + 1
 
 def is_valid_pkt(response):
-    (flag, qdcount, ancount) = struct.unpack('!HHH', response[2:8])
+    try:
+        (flag, qdcount, ancount) = struct.unpack('!HHH', response[2:8])
+        
+        if flag != 0x8180 and flag != 0x8580:
+            return True
 
-    # response pkt & standard query & no error
-    # bflag = (flag & 0x8000) and (not (flag & 0x7800)) and (not (flag & 0x000f))
-    bflag = (flag & 0x8000) and (not (flag & 0x780f))
-
-    
-    if bflag and 1 == qdcount: # and 1 == ancount:
-        (domain, dlen) = bytetodomain(response[12:])
-
-        pos = 14 + dlen  # position for qtype & qclass
+        if 1 != qdcount or 1 != ancount:
+            return True
+        
+        dlen = skip_query(response[12:])
+        pos = 12 + dlen
+        
         (qtype, qclass) = struct.unpack('!HH', response[pos:pos+4])
         # qtype is 1 (mean query HOST ADDRESS), qclass is 1 (mean INTERNET)
         if 1 != qtype or 1 != qclass:
             return True
         
         pos = pos + 4 # position for response
-        if True == ischar(response[pos:pos+1]):
-            pos = pos + dlen + 2 + 10
-        else:
+        if ord(response[pos:pos+1]) & 0xc0:
             pos = pos + 12
+        else:
+            pos = pos + dlen + 10
 
-        intip = struct.unpack('!I', response[pos:pos+4])[0]
-        if -1 != binary_search(DNSFILTER_CFG['filter_ips'], intip, 0, DNSFILTER_CFG['filter_ips_num']):
+        if response[pos:pos+4] in FAKE_IPLIST:
+            print('Match: ' + socket.inet_ntoa(response[pos:pos+4]))
             return False
+    except Exception, e:
+        print(e)
 
     return True
 
@@ -131,8 +106,7 @@ class ThreadedUDPRequestHandler(SocketServer.BaseRequestHandler):
         udp_sock = self.request[1]
         addr = self.client_address
 
-        dns_ip = DNSFILTER_CFG['dns_servs'][random.randint(0, DNSFILTER_CFG['dns_servs_num'] - 1)]
-        response = self.dns_query(dns_ip, 53, query_data)
+        response = self.dns_query(DNS_SERVER, 53, query_data)
         if response:
             # udp dns packet no length
             udp_sock.sendto(response, addr)
@@ -140,16 +114,16 @@ class ThreadedUDPRequestHandler(SocketServer.BaseRequestHandler):
     def dns_query(self, dns_ip, dns_port, query_data):
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.settimeout(5) # set socket timeout = 5s
+            s.settimeout(TIMEOUT) # set socket timeout = 5s
         
             s.sendto(query_data, (dns_ip, dns_port))
             
             for i in xrange(TRY_TIMES):
                 data, addr = s.recvfrom(1024)
-                if False == is_valid_pkt(data):
-                    date = None
+                if is_valid_pkt(data):
+                    return data
                 else:
-                    break
+                    data = None
             
         except:
             return None
@@ -158,26 +132,25 @@ class ThreadedUDPRequestHandler(SocketServer.BaseRequestHandler):
 
         return data
     
-    
 if __name__ == '__main__':
     print '---------------------------------------------------------------'
     print '| To Use this tool, you must set your dns server to 127.0.0.1 |'
     print '---------------------------------------------------------------'
 
-    # load config file
-    f = file('config.json')
-    DNSFILTER_CFG = json.load(f)
-    f.close()
-
-    # parse each para
-    DNSFILTER_CFG['dns_servs_num'] = len(DNSFILTER_CFG['dns_servs'])
-
-    DNSFILTER_CFG['filter_ips'] = []
-    for item in DNSFILTER_CFG['ip_blacklist']:
-        DNSFILTER_CFG['filter_ips'].append(ip2int(item))
-    DNSFILTER_CFG['filter_ips'].sort()
-    DNSFILTER_CFG['filter_ips_num'] = len(DNSFILTER_CFG['filter_ips'])
-
+    # load config file, iplist.txt from https://github.com/clowwindy/ChinaDNS
+    with open('iplist.txt', 'rb') as f:
+        while 1:
+            ip = f.readline()
+            if ip:
+                FAKE_IPLIST[socket.inet_aton(ip[:-1])] = None
+            else:
+                break
     
     dns_server = DNSFilter(('0.0.0.0', 53), ThreadedUDPRequestHandler)
-    dns_server.serve_forever()
+    try:
+        dns_server.serve_forever()
+    except:
+        pass
+    finally:
+        pass
+                
